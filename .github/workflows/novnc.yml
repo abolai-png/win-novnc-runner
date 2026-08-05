@@ -48,9 +48,9 @@ jobs:
               exit 1
             fi
             PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir "$WHL_URL"
-            echo "Checking Selkies installation..."
+            echo "Selkies binary location:"
             which selkies-gstreamer || ls /usr/local/bin/selkies*
-            selkies-gstreamer --help || true
+            selkies-gstreamer --help 2>&1 || true
           '
 
       - name: Create start script
@@ -58,35 +58,75 @@ jobs:
           cat > start-desktop.sh <<'SCRIPT'
           #!/bin/bash
           set -x
+          LOGFILE=/tmp/startup.log
+          exec > "$LOGFILE" 2>&1  # همه خروجی‌ها را به فایل لاگ بفرستیم
+
+          echo "=== Starting desktop environment ==="
           export DISPLAY=:0
           export XDG_RUNTIME_DIR=/tmp/runtime-kali
           mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
+
+          # مسیر PulseAudio
           export PULSE_RUNTIME_PATH="$XDG_RUNTIME_DIR/pulse"
+          mkdir -p "$PULSE_RUNTIME_PATH"
           export PULSE_SERVER="unix:${PULSE_RUNTIME_PATH}/native"
 
+          echo "Starting Xvfb..."
           Xvfb :0 -screen 0 1920x1080x24 -ac -noreset -nolisten tcp \
             +extension COMPOSITE +extension DAMAGE +extension RANDR \
             +extension RENDER +extension MIT-SHM +extension XFIXES \
             +extension XTEST > /tmp/xvfb.log 2>&1 &
+          XVFB_PID=$!
 
-          until [ -S /tmp/.X11-unix/X0 ]; do sleep 0.5; done
+          # انتظار برای سوکت X11
+          for i in $(seq 1 30); do
+            if [ -S /tmp/.X11-unix/X0 ]; then
+              echo "Xvfb socket ready."
+              break
+            fi
+            sleep 0.5
+          done
+          if [ ! -S /tmp/.X11-unix/X0 ]; then
+            echo "Xvfb socket did not appear!"
+            kill $XVFB_PID 2>/dev/null || true
+            exit 1
+          fi
 
+          echo "Starting PulseAudio..."
           pulseaudio --disallow-exit --exit-idle-time=-1 \
             --log-target=file:/tmp/pulseaudio.log > /dev/null 2>&1 &
+          PULSE_PID=$!
           sleep 2
 
+          echo "Starting Xfce..."
           dbus-launch --exit-with-session startxfce4 > /tmp/xfce.log 2>&1 &
+          XFCE_PID=$!
           sleep 5
 
+          # بررسی اینکه Xfce واقعاً بالا آمده (با چک کردن پروسه xfdesktop یا xfce4-session)
+          if ! pgrep -f "xfce4-session" > /dev/null; then
+            echo "Xfce session might not have started."
+          fi
+
           echo "Starting Selkies GStreamer..."
-          exec selkies-gstreamer \
+          # اجرای Selkies بدون exec تا خطاها را در لاگ ببینیم
+          selkies-gstreamer \
             --addr=0.0.0.0 \
             --port=8081 \
             --basic-auth "kali:${DESKTOP_PASSWORD}" \
             --encoder=jpeg \
             --framerate=30 \
-            --enable-resize \
-            > /tmp/selkies.log 2>&1
+            --enable-resize=true \
+            >> /tmp/selkies.log 2>&1 &
+          SELKIES_PID=$!
+          echo "Selkies PID: $SELKIES_PID"
+
+          # چند ثانیه صبر کن و وضعیت پروسه‌ها را ثبت کن
+          sleep 5
+          echo "Running processes:"
+          ps aux --forest || true
+          wait $SELKIES_PID
+          echo "Selkies exited with code $?"
           SCRIPT
           chmod +x start-desktop.sh
           docker cp start-desktop.sh kali:/opt/start-desktop.sh
@@ -94,13 +134,15 @@ jobs:
 
       - name: Launch desktop
         run: |
+          # اجرای اسکریپت در بک‌گراند
           docker exec -d -u kali -e DESKTOP_PASSWORD='${{ inputs.password }}' \
             kali /opt/start-desktop.sh
 
+          # انتظار برای پورت 8081 یا تشخیص خطا
           SUCCESS=0
           for i in $(seq 1 60); do
             if curl -fsS -o /dev/null http://localhost:8081 2>/dev/null; then
-              echo "Selkies is up and running on port 8081"
+              echo "Selkies is up on port 8081"
               SUCCESS=1
               break
             fi
@@ -112,7 +154,9 @@ jobs:
           done
 
           if [ $SUCCESS -eq 0 ]; then
-            echo "Error: Selkies failed to start. Dumping logs:"
+            echo "Error: Selkies failed. Dumping all logs:"
+            echo "=== STARTUP LOG (main) ==="
+            docker exec kali cat /tmp/startup.log || true
             echo "=== XVFB LOG ==="
             docker exec kali cat /tmp/xvfb.log || true
             echo "=== PULSEAUDIO LOG ==="
