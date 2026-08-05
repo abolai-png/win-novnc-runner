@@ -30,7 +30,9 @@ jobs:
               libx11-xcb1 libxcb-dri3-0 libxkbcommon0 libxdamage1 libxfixes3 \
               libxtst6 libxext6 libpulse0 pulseaudio \
               build-essential pkg-config libudev-dev \
-              libgl1-mesa-dri mesa-utils libjpeg62-turbo
+              libgl1-mesa-dri mesa-utils libjpeg62-turbo \
+              libgstreamer1.0-0 gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+              gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav
             useradd -m -s /bin/bash kali
             usermod -aG sudo kali
             echo "kali ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/kali
@@ -46,8 +48,9 @@ jobs:
               exit 1
             fi
             PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir "$WHL_URL"
-            # بررسی صحت نصب
-            selkies --version
+            echo "Checking Selkies installation..."
+            which selkies-gstreamer || ls /usr/local/bin/selkies*
+            selkies-gstreamer --help || true
           '
 
       - name: Create start script
@@ -75,16 +78,14 @@ jobs:
           dbus-launch --exit-with-session startxfce4 > /tmp/xfce.log 2>&1 &
           sleep 5
 
-          # راه‌اندازی Selkies با ثبت خروجی
-          echo "Starting Selkies..."
-          exec selkies \
+          echo "Starting Selkies GStreamer..."
+          exec selkies-gstreamer \
             --addr=0.0.0.0 \
             --port=8081 \
-            --basic-auth-user=kali \
-            --basic-auth-password="$DESKTOP_PASSWORD" \
+            --basic-auth "kali:${DESKTOP_PASSWORD}" \
             --encoder=jpeg \
             --framerate=30 \
-            --enable-resize=true \
+            --enable-resize \
             > /tmp/selkies.log 2>&1
           SCRIPT
           chmod +x start-desktop.sh
@@ -93,11 +94,9 @@ jobs:
 
       - name: Launch desktop
         run: |
-          # اجرای اسکریپت در بک‌گراند با لاگ جداگانه
           docker exec -d -u kali -e DESKTOP_PASSWORD='${{ inputs.password }}' \
             kali /opt/start-desktop.sh
 
-          # انتظار برای بالا آمدن پورت یا تشخیص خطا
           SUCCESS=0
           for i in $(seq 1 60); do
             if curl -fsS -o /dev/null http://localhost:8081 2>/dev/null; then
@@ -105,7 +104,6 @@ jobs:
               SUCCESS=1
               break
             fi
-            # اگر فرایند Selkies وجود نداشت، زودتر خطا بده
             if ! docker exec kali pgrep -f selkies > /dev/null 2>&1; then
               echo "Selkies process died. Checking logs..."
               break
