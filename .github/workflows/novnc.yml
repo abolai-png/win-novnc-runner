@@ -91,7 +91,7 @@ jobs:
         shell: pwsh
         run: |
           $log = "C:\tunnel.log"
-          Start-Process -FilePath C:\cloudflared.exe -ArgumentList "tunnel","--url","http://localhost:6080","--no-autoupdate" -RedirectStandardError $log -WindowStyle Hidden
+          Start-Process -FilePath C:\cloudflared.exe -ArgumentList "tunnel","--url","http://localhost:6080","--no-autoupdate","--protocol","http2" -RedirectStandardError $log -WindowStyle Hidden
           $url = $null
           for ($i = 0; $i -lt 40; $i++) {
             Start-Sleep -Seconds 3
