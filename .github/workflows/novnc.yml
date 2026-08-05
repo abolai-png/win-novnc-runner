@@ -28,7 +28,8 @@ jobs:
               xfce4 xfce4-terminal dbus-x11 xvfb x11-utils x11-xserver-utils x11-xkb-utils \
               python3 python3-pip python3-dev jq curl ca-certificates sudo procps \
               libx11-xcb1 libxcb-dri3-0 libxkbcommon0 libxdamage1 libxfixes3 \
-              libxtst6 libxext6 libpulse0 pulseaudio
+              libxtst6 libxext6 libpulse0 pulseaudio \
+              build-essential pkg-config libudev-dev
             useradd -m -s /bin/bash kali
             usermod -aG sudo kali
             echo "kali ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/kali
@@ -38,13 +39,11 @@ jobs:
         run: |
           docker exec kali bash -lc '
             set -e
-            # دریافت لینک مستقیم فایل .whl از آخرین نسخه
             WHL_URL=$(curl -fsSL https://api.github.com/repos/selkies-project/selkies/releases/latest | jq -r ".assets[] | select(.name | endswith(\".whl\")) | .browser_download_url")
             if [ -z "$WHL_URL" ]; then
               echo "Error: Could not find a .whl asset in the latest release"
               exit 1
             fi
-            # نصب مستقیم از روی لینک (بدون دانلود دستی)
             PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir "$WHL_URL"
           '
 
