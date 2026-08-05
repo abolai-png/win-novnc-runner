@@ -38,9 +38,13 @@ jobs:
         run: |
           docker exec kali bash -lc '
             set -e
-            V=$(curl -fsSL https://api.github.com/repos/selkies-project/selkies/releases/latest | jq -r .tag_name | sed "s/[^0-9.]//g")
-            curl -fsSL -o /tmp/selkies.whl \
-              "https://github.com/selkies-project/selkies/releases/download/v${V}/selkies-${V}-py3-none-any.whl"
+            # دریافت لینک مستقیم فایل whl از آخرین Release
+            WHL_URL=$(curl -fsSL https://api.github.com/repos/selkies-project/selkies/releases/latest | jq -r ".assets[] | select(.name | endswith(\".whl\")) | .browser_download_url")
+            if [ -z "$WHL_URL" ]; then
+              echo "Error: Could not find a .whl asset in the latest release"
+              exit 1
+            fi
+            curl -fsSL -o /tmp/selkies.whl "$WHL_URL"
             PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir /tmp/selkies.whl
             rm -f /tmp/selkies.whl
           '
