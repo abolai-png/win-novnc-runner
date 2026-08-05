@@ -29,7 +29,8 @@ jobs:
               python3 python3-pip python3-dev jq curl ca-certificates sudo procps \
               libx11-xcb1 libxcb-dri3-0 libxkbcommon0 libxdamage1 libxfixes3 \
               libxtst6 libxext6 libpulse0 pulseaudio \
-              build-essential pkg-config libudev-dev
+              build-essential pkg-config libudev-dev \
+              libgl1-mesa-dri mesa-utils libjpeg62-turbo
             useradd -m -s /bin/bash kali
             usermod -aG sudo kali
             echo "kali ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/kali
@@ -45,12 +46,15 @@ jobs:
               exit 1
             fi
             PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir "$WHL_URL"
+            # بررسی صحت نصب
+            selkies --version
           '
 
       - name: Create start script
         run: |
           cat > start-desktop.sh <<'SCRIPT'
           #!/bin/bash
+          set -x
           export DISPLAY=:0
           export XDG_RUNTIME_DIR=/tmp/runtime-kali
           mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
@@ -71,15 +75,17 @@ jobs:
           dbus-launch --exit-with-session startxfce4 > /tmp/xfce.log 2>&1 &
           sleep 5
 
+          # راه‌اندازی Selkies با ثبت خروجی
+          echo "Starting Selkies..."
           exec selkies \
             --addr=0.0.0.0 \
             --port=8081 \
-            --enable-https=false \
             --basic-auth-user=kali \
             --basic-auth-password="$DESKTOP_PASSWORD" \
             --encoder=jpeg \
             --framerate=30 \
-            --enable-resize=true
+            --enable-resize=true \
+            > /tmp/selkies.log 2>&1
           SCRIPT
           chmod +x start-desktop.sh
           docker cp start-desktop.sh kali:/opt/start-desktop.sh
@@ -87,14 +93,38 @@ jobs:
 
       - name: Launch desktop
         run: |
+          # اجرای اسکریپت در بک‌گراند با لاگ جداگانه
           docker exec -d -u kali -e DESKTOP_PASSWORD='${{ inputs.password }}' \
             kali /opt/start-desktop.sh
+
+          # انتظار برای بالا آمدن پورت یا تشخیص خطا
+          SUCCESS=0
           for i in $(seq 1 60); do
-            if curl -fsS -o /dev/null http://localhost:8081; then echo up; exit 0; fi
+            if curl -fsS -o /dev/null http://localhost:8081 2>/dev/null; then
+              echo "Selkies is up and running on port 8081"
+              SUCCESS=1
+              break
+            fi
+            # اگر فرایند Selkies وجود نداشت، زودتر خطا بده
+            if ! docker exec kali pgrep -f selkies > /dev/null 2>&1; then
+              echo "Selkies process died. Checking logs..."
+              break
+            fi
             sleep 5
           done
-          docker exec kali cat /tmp/xvfb.log /tmp/xfce.log || true
-          exit 1
+
+          if [ $SUCCESS -eq 0 ]; then
+            echo "Error: Selkies failed to start. Dumping logs:"
+            echo "=== XVFB LOG ==="
+            docker exec kali cat /tmp/xvfb.log || true
+            echo "=== PULSEAUDIO LOG ==="
+            docker exec kali cat /tmp/pulseaudio.log || true
+            echo "=== XFCE LOG ==="
+            docker exec kali cat /tmp/xfce.log || true
+            echo "=== SELKIES LOG ==="
+            docker exec kali cat /tmp/selkies.log || true
+            exit 1
+          fi
 
       - name: Install cloudflared
         run: |
