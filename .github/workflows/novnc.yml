@@ -48,123 +48,124 @@ jobs:
               exit 1
             fi
             PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir "$WHL_URL"
-            echo "Selkies binary location:"
+            echo "Checking Selkies installation..."
             which selkies-gstreamer || ls /usr/local/bin/selkies*
-            selkies-gstreamer --help 2>&1 || true
+            selkies-gstreamer --help || true
           '
 
-      - name: Create start script
+      - name: Create start script (FIXED)
         run: |
           cat > start-desktop.sh <<'SCRIPT'
           #!/bin/bash
-          set -x
-          LOGFILE=/tmp/startup.log
-          exec > "$LOGFILE" 2>&1  # همه خروجی‌ها را به فایل لاگ بفرستیم
-
-          echo "=== Starting desktop environment ==="
+          set -e
+          
+          # Log directory
+          mkdir -p /tmp/logs
+          
           export DISPLAY=:0
           export XDG_RUNTIME_DIR=/tmp/runtime-kali
           mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
-
-          # مسیر PulseAudio
           export PULSE_RUNTIME_PATH="$XDG_RUNTIME_DIR/pulse"
           mkdir -p "$PULSE_RUNTIME_PATH"
           export PULSE_SERVER="unix:${PULSE_RUNTIME_PATH}/native"
-
-          echo "Starting Xvfb..."
+          
+          echo "[$(date)] Starting Xvfb..." | tee /tmp/logs/startup.log
           Xvfb :0 -screen 0 1920x1080x24 -ac -noreset -nolisten tcp \
             +extension COMPOSITE +extension DAMAGE +extension RANDR \
             +extension RENDER +extension MIT-SHM +extension XFIXES \
-            +extension XTEST > /tmp/xvfb.log 2>&1 &
+            +extension XTEST >> /tmp/logs/xvfb.log 2>&1 &
           XVFB_PID=$!
-
-          # انتظار برای سوکت X11
-          for i in $(seq 1 30); do
+          echo "Xvfb PID: $XVFB_PID" >> /tmp/logs/startup.log
+          
+          # Wait for X server
+          echo "[$(date)] Waiting for X server..." | tee -a /tmp/logs/startup.log
+          for i in {1..30}; do
             if [ -S /tmp/.X11-unix/X0 ]; then
-              echo "Xvfb socket ready."
+              echo "X server ready!" | tee -a /tmp/logs/startup.log
               break
             fi
-            sleep 0.5
+            sleep 1
+            if [ $i -eq 30 ]; then
+              echo "ERROR: X server failed to start!" | tee -a /tmp/logs/startup.log
+              exit 1
+            fi
           done
-          if [ ! -S /tmp/.X11-unix/X0 ]; then
-            echo "Xvfb socket did not appear!"
-            kill $XVFB_PID 2>/dev/null || true
-            exit 1
-          fi
-
-          echo "Starting PulseAudio..."
+          
+          echo "[$(date)] Starting PulseAudio..." | tee -a /tmp/logs/startup.log
           pulseaudio --disallow-exit --exit-idle-time=-1 \
-            --log-target=file:/tmp/pulseaudio.log > /dev/null 2>&1 &
+            --log-target=file:/tmp/logs/pulseaudio.log 2>&1 &
           PULSE_PID=$!
+          echo "PulseAudio PID: $PULSE_PID" >> /tmp/logs/startup.log
           sleep 2
-
-          echo "Starting Xfce..."
-          dbus-launch --exit-with-session startxfce4 > /tmp/xfce.log 2>&1 &
+          
+          echo "[$(date)] Starting D-Bus and XFCE..." | tee -a /tmp/logs/startup.log
+          dbus-launch --exit-with-session startxfce4 >> /tmp/logs/xfce.log 2>&1 &
           XFCE_PID=$!
+          echo "XFCE PID: $XFCE_PID" >> /tmp/logs/startup.log
           sleep 5
-
-          # بررسی اینکه Xfce واقعاً بالا آمده (با چک کردن پروسه xfdesktop یا xfce4-session)
-          if ! pgrep -f "xfce4-session" > /dev/null; then
-            echo "Xfce session might not have started."
-          fi
-
-          echo "Starting Selkies GStreamer..."
-          # اجرای Selkies بدون exec تا خطاها را در لاگ ببینیم
+          
+          echo "[$(date)] Starting Selkies GStreamer..." | tee -a /tmp/logs/startup.log
           selkies-gstreamer \
             --addr=0.0.0.0 \
             --port=8081 \
             --basic-auth "kali:${DESKTOP_PASSWORD}" \
             --encoder=jpeg \
             --framerate=30 \
-            --enable-resize=true \
-            >> /tmp/selkies.log 2>&1 &
+            --enable-resize \
+            >> /tmp/logs/selkies.log 2>&1 &
           SELKIES_PID=$!
-          echo "Selkies PID: $SELKIES_PID"
-
-          # چند ثانیه صبر کن و وضعیت پروسه‌ها را ثبت کن
-          sleep 5
-          echo "Running processes:"
-          ps aux --forest || true
-          wait $SELKIES_PID
-          echo "Selkies exited with code $?"
+          echo "Selkies PID: $SELKIES_PID" >> /tmp/logs/startup.log
+          
+          echo "[$(date)] All services started, monitoring..." | tee -a /tmp/logs/startup.log
+          
+          # Monitor processes
+          wait -n 2>/dev/null || true
+          
+          echo "[$(date)] A service crashed!" >> /tmp/logs/startup.log
           SCRIPT
           chmod +x start-desktop.sh
           docker cp start-desktop.sh kali:/opt/start-desktop.sh
           docker exec kali chown kali:kali /opt/start-desktop.sh
 
-      - name: Launch desktop
+      - name: Launch desktop (FIXED)
         run: |
-          # اجرای اسکریپت در بک‌گراند
-          docker exec -d -u kali -e DESKTOP_PASSWORD='${{ inputs.password }}' \
-            kali /opt/start-desktop.sh
-
-          # انتظار برای پورت 8081 یا تشخیص خطا
+          docker exec -u kali kali bash -c 'export DESKTOP_PASSWORD="${{ inputs.password }}" && /opt/start-desktop.sh' &
+          
+          echo "Script started..."
+          sleep 15
+          
           SUCCESS=0
-          for i in $(seq 1 60); do
+          for i in {1..60}; do
+            echo "Attempt $i/60: Checking Selkies..."
+            
             if curl -fsS -o /dev/null http://localhost:8081 2>/dev/null; then
-              echo "Selkies is up on port 8081"
+              echo "✓ Selkies is running on port 8081"
               SUCCESS=1
               break
             fi
-            if ! docker exec kali pgrep -f selkies > /dev/null 2>&1; then
-              echo "Selkies process died. Checking logs..."
+            
+            if ! docker exec kali pgrep -f selkies-gstreamer > /dev/null 2>&1; then
+              echo "✗ Selkies process died!"
               break
             fi
+            
             sleep 5
           done
-
+          
           if [ $SUCCESS -eq 0 ]; then
-            echo "Error: Selkies failed. Dumping all logs:"
-            echo "=== STARTUP LOG (main) ==="
-            docker exec kali cat /tmp/startup.log || true
+            echo "Error: Selkies failed to start!"
+            echo "=== STARTUP LOG ==="
+            docker exec kali cat /tmp/logs/startup.log 2>/dev/null || echo "Not found"
             echo "=== XVFB LOG ==="
-            docker exec kali cat /tmp/xvfb.log || true
+            docker exec kali cat /tmp/logs/xvfb.log 2>/dev/null || echo "Not found"
             echo "=== PULSEAUDIO LOG ==="
-            docker exec kali cat /tmp/pulseaudio.log || true
+            docker exec kali cat /tmp/logs/pulseaudio.log 2>/dev/null || echo "Not found"
             echo "=== XFCE LOG ==="
-            docker exec kali cat /tmp/xfce.log || true
+            docker exec kali cat /tmp/logs/xfce.log 2>/dev/null || echo "Not found"
             echo "=== SELKIES LOG ==="
-            docker exec kali cat /tmp/selkies.log || true
+            docker exec kali cat /tmp/logs/selkies.log 2>/dev/null || echo "Not found"
+            echo "=== PROCESS LIST ==="
+            docker exec kali ps aux || echo "Not found"
             exit 1
           fi
 
