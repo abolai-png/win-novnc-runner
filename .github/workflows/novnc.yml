@@ -1,176 +1,115 @@
-name: Windows noVNC
+name: Kali Desktop (manual Selkies build)
 
 on:
   workflow_dispatch:
-  schedule:
-    # Fallback every 6 hours in case the self-dispatch chain breaks
-    - cron: '23 */6 * * *'
-
-permissions:
-  contents: write
-  actions: write
-
-concurrency:
-  group: novnc-session
-  cancel-in-progress: true
+    inputs:
+      password:
+        description: "رمز ورود"
+        required: true
+        default: "ChangeMe_123"
 
 jobs:
-  novnc:
-    runs-on: windows-2025
-    timeout-minutes: 350
+  kali-selkies:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Restore browser profiles (persistence)
-        uses: actions/cache/restore@v4
-        with:
-          path: C:\vncstate
-          key: prof-${{ github.run_number }}
-          restore-keys: |
-            prof-
-
-      - name: Clean stale browser locks after restore
-        shell: pwsh
+      - name: Start container
         run: |
-          Get-ChildItem -Path C:\vncstate -Recurse -Force -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -match '^(Singleton|lockfile|LOCK)' } |
-            Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
-          New-Item -ItemType Directory -Force -Path C:\vncstate\chrome, C:\vncstate\edge | Out-Null
+          docker run -d --name kali --privileged --shm-size=1g \
+            -p 8081:8081 kalilinux/kali-rolling sleep infinity
 
-      - name: Disable lock screen, screensaver and sleep
-        shell: pwsh
+      - name: Install desktop + deps
         run: |
-          powercfg /change standby-timeout-ac 0
-          powercfg /change standby-timeout-dc 0
-          powercfg /change monitor-timeout-ac 0
-          powercfg /change hibernate-timeout-ac 0
-          reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\Personalization" /v NoLockScreen /t REG_DWORD /d 1 /f
-          reg add "HKCU\Control Panel\Desktop" /v ScreenSaveActive /t REG_SZ /d 0 /f
-          reg add "HKCU\Control Panel\Desktop" /v ScreenSaveTimeOut /t REG_SZ /d 0 /f
-          try { Set-DisplayResolution -Width 1920 -Height 1080 -Force -ErrorAction Stop } catch { Write-Host "Resolution change skipped: $_" }
+          docker exec kali bash -lc '
+            set -e
+            apt-get update
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+              xfce4 xfce4-terminal dbus-x11 xvfb x11-utils x11-xserver-utils x11-xkb-utils \
+              python3 python3-pip python3-dev jq curl ca-certificates sudo procps \
+              libx11-xcb1 libxcb-dri3-0 libxkbcommon0 libxdamage1 libxfixes3 \
+              libxtst6 libxext6 libpulse0 pulseaudio
+            useradd -m -s /bin/bash kali
+            usermod -aG sudo kali
+            echo "kali ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/kali
+          '
 
-      - name: Install TightVNC server
-        shell: pwsh
+      - name: Install Selkies
         run: |
-          $msi = "$env:TEMP\tightvnc.msi"
-          Invoke-WebRequest -Uri "https://www.tightvnc.com/download/2.8.85/tightvnc-2.8.85-gpl-setup-64bit.msi" -OutFile $msi
-          $args = @(
-            "/i", $msi, "/quiet", "/norestart",
-            "ADDLOCAL=Server",
-            "SET_USEVNCAUTHENTICATION=1",  "VALUE_OF_USEVNCAUTHENTICATION=1",
-            "SET_PASSWORD=1",              "VALUE_OF_PASSWORD=novnc123",
-            "SET_USECONTROLAUTHENTICATION=1", "VALUE_OF_USECONTROLAUTHENTICATION=1",
-            "SET_CONTROLPASSWORD=1",       "VALUE_OF_CONTROLPASSWORD=novnc123",
-            "SET_USECONTROLWHENNOAUTH=1",  "VALUE_OF_USECONTROLWHENNOAUTH=1",
-            "SET_REMOVEWALLPAPER=1",       "VALUE_OF_REMOVEWALLPAPER=0",
-            "SET_DISABLETRAYICON=1",       "VALUE_OF_DISABLETRAYICON=1"
-          )
-          Start-Process msiexec.exe -ArgumentList $args -Wait
-          Start-Sleep -Seconds 5
-          Restart-Service tvnserver -Force -ErrorAction SilentlyContinue
-          Get-Service tvnserver
+          docker exec kali bash -lc '
+            set -e
+            V=$(curl -fsSL https://api.github.com/repos/selkies-project/selkies/releases/latest | jq -r .tag_name | sed "s/[^0-9.]//g")
+            curl -fsSL -o /tmp/selkies.whl \
+              "https://github.com/selkies-project/selkies/releases/download/v${V}/selkies-${V}-py3-none-any.whl"
+            PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir /tmp/selkies.whl
+            rm -f /tmp/selkies.whl
+          '
 
-      - name: Install noVNC + websockify
-        shell: pwsh
+      - name: Create start script
         run: |
-          pip install --quiet websockify
-          $zip = "$env:TEMP\novnc.zip"
-          Invoke-WebRequest -Uri "https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.zip" -OutFile $zip
-          Expand-Archive -Path $zip -DestinationPath C:\ -Force
-          Rename-Item C:\noVNC-1.5.0 C:\novnc
-          Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile C:\cloudflared.exe
+          cat > start-desktop.sh <<'SCRIPT'
+          #!/bin/bash
+          export DISPLAY=:0
+          export XDG_RUNTIME_DIR=/tmp/runtime-kali
+          mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
+          export PULSE_RUNTIME_PATH="$XDG_RUNTIME_DIR/pulse"
+          export PULSE_SERVER="unix:${PULSE_RUNTIME_PATH}/native"
 
-      - name: Start websockify (noVNC web on :6080)
-        shell: pwsh
+          Xvfb :0 -screen 0 1920x1080x24 -ac -noreset -nolisten tcp \
+            +extension COMPOSITE +extension DAMAGE +extension RANDR \
+            +extension RENDER +extension MIT-SHM +extension XFIXES \
+            +extension XTEST > /tmp/xvfb.log 2>&1 &
+
+          until [ -S /tmp/.X11-unix/X0 ]; do sleep 0.5; done
+
+          pulseaudio --disallow-exit --exit-idle-time=-1 \
+            --log-target=file:/tmp/pulseaudio.log > /dev/null 2>&1 &
+          sleep 2
+
+          dbus-launch --exit-with-session startxfce4 > /tmp/xfce.log 2>&1 &
+          sleep 5
+
+          exec selkies \
+            --addr=0.0.0.0 \
+            --port=8081 \
+            --enable-https=false \
+            --basic-auth-user=kali \
+            --basic-auth-password="$DESKTOP_PASSWORD" \
+            --encoder=jpeg \
+            --framerate=30 \
+            --enable-resize=true
+          SCRIPT
+          chmod +x start-desktop.sh
+          docker cp start-desktop.sh kali:/opt/start-desktop.sh
+          docker exec kali chown kali:kali /opt/start-desktop.sh
+
+      - name: Launch desktop
         run: |
-          Start-Process -FilePath python -ArgumentList "-m","websockify","--web","C:\novnc","6080","localhost:5900" -WindowStyle Hidden
-          Start-Sleep -Seconds 3
+          docker exec -d -u kali -e DESKTOP_PASSWORD='${{ inputs.password }}' \
+            kali /opt/start-desktop.sh
+          for i in $(seq 1 60); do
+            if curl -fsS -o /dev/null http://localhost:8081; then echo up; exit 0; fi
+            sleep 5
+          done
+          docker exec kali cat /tmp/xvfb.log /tmp/xfce.log || true
+          exit 1
 
-      - name: Start Cloudflare quick tunnel and capture URL
-        shell: pwsh
+      - name: Install cloudflared
         run: |
-          $log = "C:\tunnel.log"
-          Start-Process -FilePath C:\cloudflared.exe -ArgumentList "tunnel","--url","http://localhost:6080","--no-autoupdate","--protocol","http2" -RedirectStandardError $log -WindowStyle Hidden
-          $url = $null
-          for ($i = 0; $i -lt 40; $i++) {
-            Start-Sleep -Seconds 3
-            if (Test-Path $log) {
-              $m = Select-String -Path $log -Pattern 'https://[a-z0-9\-]+\.trycloudflare\.com' | Select-Object -First 1
-              if ($m) { $url = $m.Matches[0].Value; break }
-            }
-          }
-          if (-not $url) { Get-Content $log -ErrorAction SilentlyContinue; throw "Tunnel URL not found" }
-          $novnc = "$url/vnc.html?autoconnect=true&password=novnc123&resize=scale"
-          Write-Host "=============================================="
-          Write-Host "  noVNC URL: $novnc"
-          Write-Host "  VNC password: novnc123"
-          Write-Host "=============================================="
-          $novnc | Out-File -FilePath url.txt -Encoding utf8
-          Get-Content $log | Out-File -FilePath tunnel-log.txt -Encoding utf8
+          curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
+          chmod +x cloudflared && sudo mv cloudflared /usr/local/bin/cloudflared
 
-      - name: Launch Chrome and Edge with persisted profiles
-        shell: pwsh
+      - name: Start tunnel
         run: |
-          $chrome = "C:\Program Files\Google\Chrome\Application\chrome.exe"
-          $edge   = "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
-          $common = @("--no-first-run","--no-default-browser-check","--disable-session-crashed-bubble","--hide-crash-restore-bubble","--start-maximized")
-          if (Test-Path $chrome) { Start-Process $chrome -ArgumentList ($common + @("--user-data-dir=C:\vncstate\chrome","https://www.google.com")) }
-          if (Test-Path $edge)   { Start-Process $edge   -ArgumentList ($common + @("--user-data-dir=C:\vncstate\edge","https://www.bing.com")) }
+          nohup cloudflared tunnel --no-autoupdate --url http://localhost:8081 > tunnel.log 2>&1 &
+          URL=""
+          for i in $(seq 1 40); do
+            URL=$(grep -Eo 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' tunnel.log | head -n1 || true)
+            [ -n "$URL" ] && break
+            sleep 3
+          done
+          echo "::notice title=Kali Desktop::${URL:-not-found}"
+          echo "URL: $URL" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Publish tunnel URL (artifact + repo file)
-        shell: pwsh
-        run: |
-          git config user.email "actions@github.com"
-          git config user.name "github-actions"
-          git add url.txt
-          git commit -m "tunnel url run ${{ github.run_number }}: $(Get-Date -Format u)" || Write-Host "nothing to commit"
-          git remote set-url origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
-          git push origin HEAD:${{ github.ref_name }} || Write-Host "push failed (non-fatal)"
-      - name: Upload URL artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: novnc-url-run-${{ github.run_number }}
-          path: |
-            url.txt
-            tunnel-log.txt
-
-      - name: Keep session alive (~5h20m)
-        shell: pwsh
-        run: |
-          for ($i = 0; $i -lt 64; $i++) {
-            Start-Sleep -Seconds 300
-            Write-Host ("[{0}] alive {1}/64 (~{2} min)" -f (Get-Date -Format u), $i, (($i+1)*5))
-          }
-
-      - name: Gracefully close browsers (flush profiles)
-        shell: pwsh
-        run: |
-          foreach ($p in @("chrome","msedge")) {
-            Get-Process $p -ErrorAction SilentlyContinue | ForEach-Object { $_.CloseMainWindow() | Out-Null }
-          }
-          Start-Sleep -Seconds 10
-          Get-Process chrome,msedge -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-          Start-Sleep -Seconds 5
-
-      - name: Save browser profiles for next run
-        uses: actions/cache/save@v4
-        with:
-          path: C:\vncstate
-          key: prof-${{ github.run_number }}
-
-      - name: Trigger next run (self-renewing chain)
-        shell: pwsh
-        run: |
-          $headers = @{
-            Authorization = "Bearer ${{ secrets.GITHUB_TOKEN }}"
-            Accept        = "application/vnd.github+json"
-          }
-          $body = @{ ref = "${{ github.ref_name }}" } | ConvertTo-Json
-          try {
-            Invoke-RestMethod -Method Post -Headers $headers -ContentType "application/json" `
-              -Uri "https://api.github.com/repos/${{ github.repository }}/actions/workflows/novnc.yml/dispatches" -Body $body
-            Write-Host "Next run dispatched."
-          } catch {
-            Write-Host "Dispatch failed (cron fallback will restart): $_"
-          }
+      - name: Keep alive
+        run: sleep 20000
