@@ -1,2 +1,16 @@
 # win-novnc-runner
-Windows noVNC on GitHub Actions with Cloudflare Tunnel and profile persistence
+
+Windows دسکتاپ کامل با **noVNC** روی GitHub Actions (`windows-2025`) + تانل موقت Cloudflare + ذخیره‌ی خودکار پروفایل مرورگرها بین ران‌ها.
+
+## چطور کار می‌کنه
+
+1. هر ران، ویندوز 2025 بالا میاد، **TightVNC** نصب می‌شه، **noVNC + websockify** روی پورت 6080 اجرا می‌شه و یک **Cloudflare Quick Tunnel** آدرس عمومی `*.trycloudflare.com` می‌ده.
+2. کروم و اج با پروفایل دائمی (`C:\vncstate`) باز می‌شن؛ این پوشه با **GitHub Actions Cache** بین ران‌ها ذخیره/بازیابی می‌شه — تب‌های بازت بعد از ری‌استارت سر جاشون می‌مونن (مرورگرها Session Restore رو انجام می‌دن).
+3. بعد از **~5 ساعت و 20 دقیقه** مرورگرها تمیز بسته می‌شن، پروفایل‌ها ذخیره می‌شه و ران بعدی به‌صورت خودکار dispatch می‌شه (زنجیره‌ی خود-تجدید + cron fallback هر 6 ساعت).
+
+## استفاده
+
+- لینک noVNC توی **لاگ ران** (استپ "Start Cloudflare quick tunnel") و فایل **`url.txt`** در ریپو و **artifact** هر ران قرار می‌گیره.
+- پسورد VNC: `novnc123`
+
+> ⚠️ این پروژه برای استفاده‌ی شخصی/آزمایشیه. محدودیت job در GitHub Actions برابر 6 ساعته؛ برای همین زنجیره‌ی ران‌های پشت‌سرهم طراحی شده.
